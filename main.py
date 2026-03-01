@@ -1,13 +1,9 @@
 import os
-import os.path
-from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from dotenv import load_dotenv
@@ -25,90 +21,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# If modifying these scopes, delete the file token.json.
+# Scopes for Google Calendar API
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 CALENDAR_ID = os.getenv("CALENDAR_ID")
-CLIENT_SECRET_FILE = os.getenv("GOOGLE_CLIENT_SECRET_FILE")
-REDIRECT_URI = os.getenv("REDIRECT_URI")
-
-# Store flow state globally for this simple local app
-flow_state = {}
+SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
 
 def get_calendar_service():
-    creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    if not SERVICE_ACCOUNT_FILE or not os.path.exists(SERVICE_ACCOUNT_FILE):
+        raise HTTPException(
+            status_code=500, 
+            detail="Service account credentials file not found."
+        )
     
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            raise HTTPException(
-                status_code=401, 
-                detail="Authentication required. Please visit /auth to start the flow."
-            )
-        
-        with open("token.json", "w") as token:
-            token.write(creds.to_json())
-
-    return build("calendar", "v3", credentials=creds)
-
-@app.get("/auth")
-async def auth():
-    """Returns the authorization URL to the user."""
-    flow = InstalledAppFlow.from_client_secrets_file(
-        CLIENT_SECRET_FILE, SCOPES, redirect_uri=REDIRECT_URI
-    )
-    auth_url, _ = flow.authorization_url(prompt='consent')
-    
-    # Save the code_verifier for the callback
-    flow_state["code_verifier"] = flow.code_verifier
-    
-    return {"auth_url": auth_url}
-
-@app.get("/callback")
-async def callback(code: str):
-    """Receives the code from the user and saves the token."""
-    if "code_verifier" not in flow_state:
-        raise HTTPException(status_code=400, detail="No active auth session found. Please go to /auth first.")
-        
-    flow = InstalledAppFlow.from_client_secrets_file(
-        CLIENT_SECRET_FILE, SCOPES, redirect_uri=REDIRECT_URI
-    )
-    # Re-inject the verifier from the previous step
-    flow.code_verifier = flow_state["code_verifier"]
-    
-    flow.fetch_token(code=code)
-    creds = flow.credentials
-    with open("token.json", "w") as token:
-        token.write(creds.to_json())
-    
-    # Clean up state
-    del flow_state["code_verifier"]
-    
-    return {"message": "Authentication successful! You can now use the calendar endpoints."}
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, scopes=SCOPES
+        )
+        return build("calendar", "v3", credentials=creds)
+    except Exception as e:
+        print(f"Error loading credentials: {e}")
+        raise HTTPException(status_code=500, detail="Could not initialize Google Calendar service.")
 
 @app.get("/last-updated")
 async def get_last_updated():
     try:
         service = get_calendar_service()
-        # Fetch the calendar metadata to get the 'updated' field
-        calendar = service.calendars().get(calendarId=CALENDAR_ID).execute()
-        updated_time = calendar.get("updated")
         
-        if not updated_time:
-            # Fallback: check the last modified event if 'updated' is missing
+        # We want the absolute latest modification time. 
+        # The 'updated' field on the calendar metadata is often unreliable or reflects 
+        # only metadata changes. Instead, we look at the events themselves.
+        #
+        # orderBy='updated' returns events in ASCENDING order (oldest first).
+        # We iterate through all pages to find the very last (most recent) event update.
+        
+        latest_update = None
+        page_token = None
+        
+        while True:
+            # Use singleEvents=False to see the original recurring events' update times
+            # and showDeleted=True to include event deletions.
             events_result = service.events().list(
                 calendarId=CALENDAR_ID, 
-                maxResults=1, 
+                maxResults=2500, 
                 orderBy="updated", 
-                singleEvents=True
+                showDeleted=True,
+                pageToken=page_token,
+                singleEvents=False
             ).execute()
-            events = events_result.get("items", [])
-            if events:
-                updated_time = events[0].get("updated")
+            
+            items = events_result.get("items", [])
+            if items:
+                # The last item in the list is the most recently updated in this batch
+                latest_update = items[-1].get("updated")
+            
+            page_token = events_result.get("nextPageToken")
+            if not page_token:
+                break
 
-        return {"last_updated": updated_time}
+        return {"last_updated": latest_update}
 
     except HttpError as error:
         print(f"An error occurred: {error}")

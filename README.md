@@ -9,15 +9,17 @@ Simple backend to fetch the "last updated" timestamp of a Google Calendar.
     ```bash
     uv sync
     ```
-3.  Ensure `client_secret_....json` is in the same directory (already provided).
-4.  Run the backend:
+3.  Ensure your Google Service Account JSON key file is in the root directory.
+4.  Create or update the `.env` file with the following:
+    ```
+    CALENDAR_ID=your_calendar_id@group.calendar.google.com
+    GOOGLE_SERVICE_ACCOUNT_FILE=your-service-account-file.json
+    ```
+5.  **Important:** Share your Google Calendar with the service account email address (found in the JSON file) with at least "See all event details" permissions.
+6.  Run the backend:
     ```bash
     uv run python main.py
     ```
-
-## Authentication
-
-When you run the backend for the first time, a browser window will open for you to authorize the application to read your calendar. Once authorized, a `token.json` file will be created, and you won't need to authorize again.
 
 ## Usage
 
